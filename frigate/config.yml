@@ -1,0 +1,78 @@
+mqtt:
+  host: mosquitto
+  port: 1883
+  user: '{FRIGATE_MQTT_USER}'
+  password: '{FRIGATE_MQTT_PASSWORD}'
+
+detectors:
+  cpu1:
+    type: cpu
+
+cameras:
+  bird_feeder:
+    ffmpeg:
+      inputs:
+        - path: 
+            rtsp://{FRIGATE_RTSP_USER}:{FRIGATE_RTSP_PASSWORD}@{FRIGATE_CAMERA_IP}:554/stream1
+          roles:
+            - detect
+        - path: 
+            rtsp://{FRIGATE_RTSP_USER}:{FRIGATE_RTSP_PASSWORD}@{FRIGATE_CAMERA_IP}:554/stream1
+          roles:
+            - record
+    detect:
+      width: 640
+      height: 480
+      fps: 5
+    objects:
+      track:
+        - bird
+        - cat
+      filters:
+        bird:
+          min_score: 0.4
+          min_area: 150
+        cat:
+          min_score: 0.5
+    snapshots:
+      enabled: true
+      crop: true
+      retain:
+        default: 30
+    record:
+      enabled: true
+      retain:
+        # 4 hours of continuous recording (0.17 days = ~4 hours)
+        days: 0.17
+      alerts:
+        retain:
+          days: 30
+          mode: active_objects
+      detections:
+        retain:
+          days: 30
+          mode: active_objects
+    motion:
+      threshold: 22
+      contour_area: 15
+      improve_contrast: true
+
+detect:
+  enabled: true
+
+version: 0.16-0
+
+semantic_search:
+  enabled: true
+  model_size: small
+
+face_recognition:
+  enabled: false
+  model_size: small
+
+lpr:
+  enabled: false
+
+classification:
+  bird:
+    enabled: true

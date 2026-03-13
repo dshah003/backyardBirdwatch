@@ -1,0 +1,78 @@
+mqtt:
+  host: mosquitto
+  port: 1883
+  user: '{FRIGATE_MQTT_USER}'
+  password: '{FRIGATE_MQTT_PASSWORD}'
+
+detectors:
+  cpu1:
+    type: cpu
+
+cameras:
+  bird_feeder:
+    ffmpeg:
+      inputs:
+        # Both roles share the one mediamtx RTSP stream.
+        # No auth needed — mediamtx runs on the local Docker network.
+        - path: rtsp://restreamer:8554/sample
+          roles:
+            - detect
+            - record
+    detect:
+      width: 1280
+      height: 720
+      fps: 5
+    objects:
+      track:
+        - bird
+        - cat
+      filters:
+        bird:
+          min_score: 0.1
+          min_area: 10
+        cat:
+          min_score: 0.5
+    snapshots:
+      enabled: true
+      crop: true
+      retain:
+        default: 30
+    record:
+      enabled: true
+      retain:
+        days: 0.17
+      alerts:
+        retain:
+          days: 30
+          mode: active_objects
+      detections:
+        retain:
+          days: 30
+          mode: active_objects
+    motion:
+      # In test mode, set the absolute minimum values so that even the tiny
+      # inter-frame pixel differences from H.264 encoding (or the Ken Burns
+      # zoom in the test video) reliably trigger object detection on every image.
+      threshold: 10
+      contour_area: 10
+      improve_contrast: true
+
+detect:
+  enabled: true
+
+version: 0.16-0
+
+semantic_search:
+  enabled: true
+  model_size: small
+
+face_recognition:
+  enabled: false
+  model_size: small
+
+lpr:
+  enabled: false
+
+classification:
+  bird:
+    enabled: true

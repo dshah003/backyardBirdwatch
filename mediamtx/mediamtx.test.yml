@@ -1,0 +1,36 @@
+# mediamtx config — loops a local video file as an RTSP stream for Frigate.
+# The ffmpeg process starts automatically when mediamtx starts and loops forever.
+# Frigate (and VLC) can connect at:  rtsp://localhost:8554/sample
+#
+# Tested against mediamtx v1.x — protocol keys are now top-level booleans,
+# not nested objects.
+
+logLevel: info
+logDestinations: [stdout]
+
+# Enable the HTTP control API (used by the health check on port 9997).
+api: true
+apiAddress: :9997
+
+# RTSP is the only protocol we need; disable everything else.
+rtsp: true
+rtspTransports: [tcp]
+
+rtmp: false
+hls: false
+webrtc: false
+srt: false
+
+paths:
+  sample:
+    # ffmpeg reads /video/sample.mp4 (bind-mounted by docker-compose.test.yml),
+    # re-encodes to a Frigate-friendly H.264 stream, and publishes to mediamtx.
+    # -re           : read input at native frame rate (real-time playback)
+    # -stream_loop -1 : loop forever
+    runOnInit: >-
+      ffmpeg
+      -re -stream_loop -1 -i /video/sample.mp4
+      -c:v libx264 -preset ultrafast -tune zerolatency
+      -an
+      -f rtsp rtsp://localhost:8554/sample
+    runOnInitRestart: true

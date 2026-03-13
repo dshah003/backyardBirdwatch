@@ -1,0 +1,42 @@
+# docker-compose overlay for testing with a local sample video.
+#
+# Usage:
+#   1. Place your sample video at  test-videos/sample.mp4
+#      (or set TEST_VIDEO=/absolute/path/to/video.mp4 before the command)
+#   2. Run the full stack against the video loop:
+#        docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+#   3. Open Frigate at http://localhost:5000 and watch events accumulate.
+#   4. Tear down with:
+#        docker compose -f docker-compose.yml -f docker-compose.test.yml down
+#
+# The `restreamer` service loops the video forever as an RTSP stream at
+# rtsp://localhost:8554/sample.  Frigate is reconfigured to read from there
+# instead of the real camera.
+
+services:
+  restreamer:
+    image: bluenviron/mediamtx:latest-ffmpeg
+    volumes:
+      - ${TEST_VIDEO:-./test-videos/sample.mp4}:/video/sample.mp4:ro
+      - ./mediamtx/mediamtx.test.yml:/mediamtx.yml:ro
+    ports:
+      - "8556:8554"   # RTSP — handy for verifying with VLC (host:8556 → container:8554)
+                      # (8554 is already taken by Frigate's own RTSP output)
+      - "9997:9997"   # mediamtx HTTP API
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9997/v3/paths/list"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  frigate:
+    # Mount the test config on top of the live one.
+    # Docker processes mounts in order; the last entry for a given container
+    # path wins, so config.test.yml replaces config.yml at runtime.
+    volumes:
+      - ./frigate/config.test.yml:/config/config.yml
+    depends_on:
+      restreamer:
+        condition: service_healthy

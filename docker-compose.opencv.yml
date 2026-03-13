@@ -1,0 +1,97 @@
+# Standalone OpenCV-based bird detection stack.
+# Replaces Frigate with the custom bird-detector service.
+#
+# Usage (live camera):
+#   docker compose -f docker-compose.opencv.yml up -d
+#
+# Requires .env with at minimum:
+#   VIDEO_SOURCE=rtsp://<user>:<pass>@<camera-ip>:554/stream2
+#   MQTT_USER=...
+#   MQTT_PASSWORD=...
+#   LATITUDE=...
+#   LONGITUDE=...
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1",
+             "-u", "${MQTT_USER}", "-P", "${MQTT_PASSWORD}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  bird-detector:
+    build: ./bird-detector
+    volumes:
+      - ./data:/data
+      # Persist downloaded model weights across restarts
+      - model-cache:/root/.cache
+    environment:
+      VIDEO_SOURCE: "${VIDEO_SOURCE}"
+      VIDEO_LOOP: "${VIDEO_LOOP:-true}"
+      CAPTURE_FPS: "${CAPTURE_FPS:-5}"
+      # Motion detection
+      MOTION_HISTORY: "${MOTION_HISTORY:-300}"
+      MOTION_VAR_THRESHOLD: "${MOTION_VAR_THRESHOLD:-32}"
+      MOTION_MIN_AREA: "${MOTION_MIN_AREA:-800}"
+      MOTION_MAX_AREA: "${MOTION_MAX_AREA:-120000}"
+      MOTION_DILATE_ITER: "${MOTION_DILATE_ITER:-2}"
+      # YOLO
+      YOLO_MODEL: "${YOLO_MODEL:-yolov8n.pt}"
+      YOLO_CONFIDENCE: "${YOLO_CONFIDENCE:-0.25}"
+      DETECTION_MIN_AREA: "${DETECTION_MIN_AREA:-500}"
+      DETECTION_MAX_AREA: "${DETECTION_MAX_AREA:-80000}"
+      # Classification
+      LOCAL_MODEL_CONFIDENCE_THRESHOLD: "${LOCAL_MODEL_CONFIDENCE_THRESHOLD:-0.85}"
+      MIN_CONFIDENCE_LOG: "${MIN_CONFIDENCE_LOG:-0.3}"
+      MIN_CONFIDENCE_NOTIFY: "${MIN_CONFIDENCE_NOTIFY:-0.7}"
+      DETECTION_COOLDOWN_SEC: "${DETECTION_COOLDOWN_SEC:-10.0}"
+      # MQTT
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      MQTT_USER: "${MQTT_USER}"
+      MQTT_PASSWORD: "${MQTT_PASSWORD}"
+      # Location
+      LATITUDE: "${LATITUDE}"
+      LONGITUDE: "${LONGITUDE}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
+  debug-viewer:
+    build: ./bird-detector
+    profiles: [debug]
+    command: python /scripts/debug_view.py
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./scripts:/scripts:ro
+      - model-cache:/root/.cache
+    environment:
+      VIDEO_SOURCE: "${VIDEO_SOURCE}"
+      DEBUG_PORT: "8090"
+      DEBUG_CLASSIFY: "${DEBUG_CLASSIFY:-false}"
+      YOLO_MODEL: "${YOLO_MODEL:-yolov8n.pt}"
+      YOLO_CONFIDENCE: "${YOLO_CONFIDENCE:-0.25}"
+      CAPTURE_FPS: "${CAPTURE_FPS:-10}"
+      MOTION_VAR_THRESHOLD: "${MOTION_VAR_THRESHOLD:-32}"
+      MOTION_MIN_AREA: "${MOTION_MIN_AREA:-800}"
+    restart: unless-stopped
+
+volumes:
+  model-cache:

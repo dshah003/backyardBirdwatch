@@ -1,0 +1,15 @@
+# Core CV and detection
+opencv-python-headless>=4.9
+ultralytics>=8.2          # YOLOv8n — downloads yolov8n.pt on first run
+
+# Species classifier
+tensorflow>=2.15
+tensorflow-hub>=0.16
+
+# MQTT
+paho-mqtt>=2.0
+
+# Utilities
+numpy>=1.24
+requests>=2.31            # label-map download
+Pillow>=10.0

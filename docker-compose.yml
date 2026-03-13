@@ -1,0 +1,73 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-u", "${MQTT_USER}", "-P", "${MQTT_PASSWORD}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable
+    privileged: true
+    shm_size: "256mb"
+    ports:
+      - "5000:5000"
+      - "8554:8554"
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    volumes:
+      - ./frigate/config.yml:/config/config.yml
+      - ./frigate/storage:/media/frigate
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      FRIGATE_RTSP_PASSWORD: "${RTSP_PASSWORD}"
+      FRIGATE_RTSP_USER: "${RTSP_USER}"
+      FRIGATE_CAMERA_IP: "${CAMERA_IP}"
+      FRIGATE_MQTT_USER: "${MQTT_USER}"
+      FRIGATE_MQTT_PASSWORD: "${MQTT_PASSWORD}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
+  bird-classifier:
+    build: ./bird-classifier
+    volumes:
+      - ./data:/data
+      - ./frigate/storage:/media/frigate:ro
+      - ./bird-classifier/species_list.txt:/app/species_list.txt:ro
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      MQTT_USER: "${MQTT_USER}"
+      MQTT_PASSWORD: "${MQTT_PASSWORD}"
+      FRIGATE_URL: "http://frigate:5000"
+      LATITUDE: "${LATITUDE}"
+      LONGITUDE: "${LONGITUDE}"
+      INAT_RATE_LIMIT_PER_MIN: "${INAT_RATE_LIMIT_PER_MIN:-30}"
+      MIN_CONFIDENCE_LOG: "${MIN_CONFIDENCE_LOG:-0.3}"
+      MIN_CONFIDENCE_NOTIFY: "${MIN_CONFIDENCE_NOTIFY:-0.7}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      frigate:
+        condition: service_healthy

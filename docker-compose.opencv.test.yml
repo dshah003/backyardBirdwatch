@@ -1,0 +1,43 @@
+# Test overlay for the OpenCV stack — adds mediamtx to loop a local video.
+#
+# Usage:
+#   # 1. Put your test video at test-videos/sample.mp4
+#   # 2. Start the stack:
+#   docker compose -f docker-compose.opencv.yml -f docker-compose.opencv.test.yml up -d
+#
+# The bird-detector will read the RTSP stream from mediamtx (looped video)
+# exactly as it would from a real camera.  Check results with:
+#   tail -f data/detections.csv
+#   sqlite3 data/detections.db "SELECT timestamp,species_common,confidence FROM detections ORDER BY id DESC LIMIT 20;"
+
+services:
+  restreamer:
+    image: bluenviron/mediamtx:latest-ffmpeg
+    ports:
+      - "8556:8554"   # host:container — avoids clash if Frigate stack is also running
+      - "9997:9997"   # mediamtx API
+    volumes:
+      - ./mediamtx/mediamtx.test.yml:/mediamtx.yml:ro
+      - ./test-videos:/video:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9997/v3/paths/list"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+  bird-detector:
+    environment:
+      VIDEO_SOURCE: "rtsp://restreamer:8554/sample"
+      VIDEO_LOOP: "true"
+    depends_on:
+      restreamer:
+        condition: service_healthy
+
+  debug-viewer:
+    environment:
+      VIDEO_SOURCE: "rtsp://restreamer:8554/sample"
+    depends_on:
+      restreamer:
+        condition: service_healthy

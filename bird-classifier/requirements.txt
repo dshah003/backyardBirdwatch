@@ -1,0 +1,6 @@
+paho-mqtt>=2.0
+requests>=2.31
+Pillow>=10.0
+tensorflow>=2.15
+tensorflow-hub>=0.16
+numpy>=1.24
