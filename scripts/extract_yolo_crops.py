@@ -167,10 +167,6 @@ def run(args: argparse.Namespace) -> None:
         frame_num += 1
 
         if frame_num % sample_every != 0:
-            # Still feed motion detector on skipped frames so the background
-            # model stays current (mirrors pipeline behaviour).
-            if motion_detector is not None:
-                motion_detector.detect(frame)
             continue
 
         sampled += 1
