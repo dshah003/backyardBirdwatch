@@ -4,7 +4,8 @@ Loop:
   1. Read frame from RTSP / video file at CAPTURE_FPS.
   2. MotionDetector flags frames with significant foreground movement.
   3. On motion → BirdDetector (YOLOv8n) scans the full frame for bird/cat.
-  4. For each 'bird' detection → SpeciesClassifier (TFHub AIY Birds V1).
+  4. For each 'bird' detection → species classifier (backend set by
+     CLASSIFIER_BACKEND: 'tfhub' | 'bioclip' | 'nabirds').
   5. Results above MIN_CONFIDENCE_LOG are written to CSV + SQLite and
      published to MQTT.  A per-region cooldown prevents duplicate entries
      for the same bird sitting at the feeder.
@@ -25,7 +26,6 @@ import cv2
 import numpy as np
 
 import config
-from classifier import SpeciesClassifier
 from detector import BirdDetector, Detection
 from logger import DetectionLogger, DetectionRecord
 from motion import MotionDetector
@@ -100,7 +100,6 @@ class _CooldownTracker:
 
     def __init__(self, cooldown_sec: float) -> None:
         self._cooldown = cooldown_sec
-        # key: (x1//50, y1//50) bucket → last-logged timestamp
         self._last: dict[tuple[int, int], float] = {}
 
     def is_ready(self, det: Detection) -> bool:
@@ -137,11 +136,38 @@ class _ThrottledCapture:
             if now >= self._next_t:
                 self._next_t = now + self._interval
                 return frame
-            # drop the frame and grab the next one immediately
-            # (VideoCapture buffers; just keep reading until in sync)
 
     def release(self) -> None:
         self._cap.release()
+
+
+# ── Classifier factory ─────────────────────────────────────────────────────
+
+def _make_classifier():
+    """Instantiate the species classifier selected by CLASSIFIER_BACKEND."""
+    backend = config.CLASSIFIER_BACKEND.lower()
+    if backend == "bioclip":
+        from classifier_bioclip import BioCLIPClassifier
+        logger.info("Using classifier backend: BioCLIP (%s)", config.BIOCLIP_MODEL)
+        return BioCLIPClassifier(
+            species_list_path=config.SPECIES_LIST_PATH,
+            model_name=config.BIOCLIP_MODEL,
+        )
+    elif backend == "nabirds":
+        from classifier_nabirds import NABirdsClassifier
+        logger.info("Using classifier backend: NABirds/HF (%s)", config.NABIRDS_MODEL)
+        return NABirdsClassifier(
+            model_name=config.NABIRDS_MODEL,
+            species_list_path=config.SPECIES_LIST_PATH,
+        )
+    else:
+        if backend != "tfhub":
+            logger.warning(
+                "Unknown CLASSIFIER_BACKEND %r — falling back to tfhub", backend
+            )
+        from classifier import SpeciesClassifier
+        logger.info("Using classifier backend: TFHub AIY Birds V1")
+        return SpeciesClassifier(species_list_path=config.SPECIES_LIST_PATH)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────
@@ -162,8 +188,9 @@ def run() -> None:
         confidence=config.YOLO_CONFIDENCE,
         min_area=config.DETECTION_MIN_AREA,
         max_area=config.DETECTION_MAX_AREA,
+        predator_min_area=config.PREDATOR_MIN_AREA,
     )
-    classifier = SpeciesClassifier(species_list_path=config.SPECIES_LIST_PATH)
+    classifier = _make_classifier()
     det_logger = DetectionLogger()
     cooldown = _CooldownTracker(config.DETECTION_COOLDOWN_SEC)
     mqtt = _make_mqtt_client()
@@ -181,7 +208,6 @@ def run() -> None:
             continue
 
         try:
-            # Seed the background model before entering the detection loop.
             logger.info("Warming up motion background model …")
             first_frame = None
             for frame in cap:
@@ -243,7 +269,7 @@ def run() -> None:
                         timestamp=ts,
                         species_common=species,
                         confidence=conf,
-                        classifier="tfhub_birds",
+                        classifier=config.CLASSIFIER_BACKEND,
                         snapshot_path=snap,
                     )
                     det_logger.log(record)
@@ -252,7 +278,7 @@ def run() -> None:
                         "timestamp": ts,
                         "species_common": species,
                         "confidence": conf,
-                        "classifier": "tfhub_birds",
+                        "classifier": config.CLASSIFIER_BACKEND,
                         "snapshot_path": snap,
                         "yolo_confidence": det.confidence,
                         "bbox": [det.x1, det.y1, det.x2, det.y2],

@@ -9,10 +9,10 @@ COCO class IDs (0-indexed, as used by ultralytics):
     16 → dog
     21 → bear
 
-Note: squirrel and raccoon are not COCO classes.  Restricting inference to
-only {bird, cat} forces YOLO to misclassify squirrels as cats.  Allowing
-all classes lets YOLO abstain when it isn't confident in any of its known
-labels, which is the correct behaviour for animals it wasn't trained on.
+Small-blob demoting: if a predator-class detection has a bounding-box area
+smaller than predator_min_area it is almost certainly a small bird
+misclassified by YOLO (e.g. a titmouse labelled "cat").  Those detections
+are relabelled "bird" so the species classifier handles them instead.
 """
 
 import logging
@@ -23,12 +23,14 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # COCO class IDs we care about.
-_CLASSES = {14: "bird", 15: "cat", 16: "dog", 21: "bear"}
+_BIRD_CLASS = 14
+_PREDATOR_CLASSES = {15: "cat", 16: "dog", 21: "bear"}
+_ALL_CLASSES = {_BIRD_CLASS: "bird", **_PREDATOR_CLASSES}
 
 
 @dataclass
 class Detection:
-    label: str       # "bird" or "cat"
+    label: str       # "bird", "cat", "dog", or "bear"
     confidence: float
     x1: int
     y1: int
@@ -50,43 +52,37 @@ class BirdDetector:
         confidence: float = 0.25,
         min_area: int = 500,
         max_area: int = 80000,
+        predator_min_area: int = 15000,
     ) -> None:
         self._model_name = model_name
         self._confidence = confidence
         self.min_area = min_area
         self.max_area = max_area
+        self._predator_min_area = predator_min_area
         self._model = None
         logger.info(
-            "BirdDetector: model=%s confidence=%.2f area=[%d, %d]",
-            model_name, confidence, min_area, max_area,
+            "BirdDetector: model=%s confidence=%.2f area=[%d, %d] predator_min_area=%d",
+            model_name, confidence, min_area, max_area, predator_min_area,
         )
 
     def load(self) -> None:
         """Download (if needed) and load the YOLO model.  Call once at startup."""
-        from ultralytics import YOLO  # import deferred — heavy dependency
+        from ultralytics import YOLO
 
         logger.info("Loading YOLO model: %s (downloads on first run) …", self._model_name)
         self._model = YOLO(self._model_name)
-        # Prime the model with a dummy pass to avoid latency on the first real frame.
         dummy = np.zeros((320, 320, 3), dtype=np.uint8)
         self._model(dummy, verbose=False)
         logger.info("YOLO model ready")
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
-        """Run inference and return bird/cat detections within size bounds."""
+        """Run inference and return bird/predator detections within size bounds."""
         if self._model is None:
             logger.error("Model not loaded — call load() first")
             return []
 
         try:
-            results = self._model(
-                frame,
-                conf=self._confidence,
-                # No class filter: letting YOLO evaluate all 80 COCO classes
-                # prevents it from force-fitting squirrels/raccoons into the
-                # nearest allowed class (cat).  We filter to _CLASSES below.
-                verbose=False,
-            )
+            results = self._model(frame, conf=self._confidence, verbose=False)
         except Exception:
             logger.exception("YOLO inference failed")
             return []
@@ -95,7 +91,7 @@ class BirdDetector:
         for result in results:
             for box in result.boxes:
                 cls_id = int(box.cls[0])
-                label = _CLASSES.get(cls_id)
+                label = _ALL_CLASSES.get(cls_id)
                 if label is None:
                     continue
 
@@ -103,6 +99,17 @@ class BirdDetector:
                 area = (x2 - x1) * (y2 - y1)
                 if not (self.min_area <= area <= self.max_area):
                     continue
+
+                # Demote small predator detections to "bird".  A titmouse or
+                # chickadee at typical feeder distance is 2 000–8 000 px²;
+                # a real cat fills 20 000 px²+.  YOLO-nano frequently mislabels
+                # small birds as "cat" — this catches that case.
+                if label != "bird" and area < self._predator_min_area:
+                    logger.debug(
+                        "Demoting %s (area=%d < predator_min_area=%d) → bird",
+                        label, area, self._predator_min_area,
+                    )
+                    label = "bird"
 
                 detections.append(
                     Detection(
