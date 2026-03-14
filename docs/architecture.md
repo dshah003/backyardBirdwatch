@@ -3,14 +3,13 @@
 ## Overview
 
 ```
-Tapo C200 ──RTSP──▶ Frigate NVR ──MQTT──▶ Bird Classifier ──▶ CSV / SQLite
-(stream2: detect)       │             frigate/events    │
-(stream1: record)       │                               │ MQTT publish
-                        │                               ▼
-                   Mosquitto ◀────────── birdfeeder/* topics
+Tapo C200 ──RTSP──▶ bird-detector ──MQTT──▶ birdfeeder/* topics
+                    (OpenCV pipeline)         │
+                                              ▼
+                                        CSV / SQLite
 ```
 
-All services run in Docker containers on a single Ubuntu laptop, communicating over a Docker bridge network. Nothing leaves the home network except calls to the iNaturalist API.
+All services run in Docker containers on a single Ubuntu laptop.  No cloud services are required — everything runs locally.
 
 ---
 
@@ -18,81 +17,74 @@ All services run in Docker containers on a single Ubuntu laptop, communicating o
 
 ### Mosquitto (MQTT Broker)
 - Eclipse Mosquitto 2
-- Port 1883 (internal + host)
-- Authenticated — password file at `mosquitto/config/password_file`
-- Persistent message storage in `mosquitto/data/`
+- Port 1883
+- Authenticated via password file at `mosquitto/config/password_file`
+- Persistent storage in `mosquitto/data/`
 
-### Frigate NVR
-- `ghcr.io/blakeblackshear/frigate:stable`
-- Port 5000 (web UI), 8554 (RTSP re-stream), 8555 (WebRTC)
-- Consumes **stream2** (360p) for motion detection and object detection at 5 fps
-- Consumes **stream1** (1080p) for recording and high-res snapshots
-- Default SSD MobileNet model detects `bird` and `cat` from the COCO class set
-- Publishes detection events to `frigate/events` on Mosquitto
-- Saves cropped detection snapshots to `frigate/storage/`
-
-### Bird Classifier
-- Custom Python 3.11 service, built from `bird-classifier/Dockerfile`
-- Subscribes to `frigate/events`, filters for `bird` and `cat` labels
-- Runs the two-stage classification pipeline (see below)
-- Publishes enriched detections to `birdfeeder/*` topics
-- Logs every detection to CSV and SQLite
+### bird-detector
+- Custom Python 3.11 service (`bird-detector/`)
+- Reads directly from the camera RTSP stream via OpenCV
+- Runs the full detection pipeline (motion → YOLO → species classifier)
+- Publishes detections to `birdfeeder/*` MQTT topics
+- Writes every detection to CSV and SQLite
 
 ---
 
-## Two-Stage Classification Pipeline
+## Detection Pipeline
 
 ```
-Frigate "end" event received
+RTSP stream (sampled at CAPTURE_FPS)
         │
         ▼
-Download cropped snapshot from Frigate API
+MotionDetector (OpenCV MOG2 background subtractor)
         │
+        │  no motion blob in [MOTION_MIN_AREA, MOTION_MAX_AREA] → skip frame
         ▼
-Stage 1: Local TFHub model (fast, ~50ms, ~900 species)
+BirdDetector (YOLOv8n — COCO classes 14=bird 15=cat 16=dog 21=bear)
         │
-   conf ≥ 0.85 ──────────────────────────────▶ Use local result
+        ├── label = "bird"
+        │       │
+        │       ▼
+        │   SpeciesClassifier (backend: tfhub | bioclip | nabirds)
+        │       │
+        │       ├── conf ≥ MIN_CONFIDENCE_LOG  → log + MQTT publish
+        │       └── conf < MIN_CONFIDENCE_LOG  → save crop to corrections/
         │
-   conf < 0.85
-        │
-        ▼
-Stage 2: iNaturalist CV API (rate-limited, 109K+ taxa, location-aware)
-        │
-   iNat success ──────────────────────────────▶ Use iNat result
-        │
-   iNat failed + local result available ──────▶ Use local result
-        │
-   No result ──────────────────────────────────▶ species = "Unknown"
-        │
-        ▼
-conf < MIN_CONFIDENCE_LOG (0.3) ────────────▶ Drop (no log)
-        │
-conf ≥ MIN_CONFIDENCE_LOG
-        │
-        ├── conf < MIN_CONFIDENCE_NOTIFY (0.7)
-        │   └── Save to data/corrections/ + publish to birdfeeder/unknown
-        │
-        └── conf ≥ MIN_CONFIDENCE_NOTIFY
-            └── Archive snapshot + publish to birdfeeder/detection
-                + check for new species (birdfeeder/new_species)
+        └── label = "cat" / "dog" / "bear"
+                │
+                ├── area < PREDATOR_MIN_AREA   → demote to "bird" (small-bird misclassification)
+                └── conf ≥ PREDATOR_MIN_CONFIDENCE → predator alert + MQTT
 ```
 
-**Why classify only on "end" events?**
-A single bird visit generates multiple Frigate events (new, update, end). Processing only the final "end" event avoids duplicate log entries and unnecessary API calls. The "end" event also has the best snapshot — Frigate picks the clearest frame over the course of the detection.
+**Why motion gating?**  Running YOLO on every frame at 5 fps is expensive.  The MOG2 background subtractor is cheap and eliminates 90%+ of frames at a static feeder (wind, lighting changes are filtered by area bounds).
+
+**Why demote small predator detections?**  YOLOv8-nano frequently mislabels small songbirds (titmouse, chickadee) as "cat" at low confidence.  A real cat fills 20 000+ px²; a titmouse is 2 000–8 000 px².  Detections below `PREDATOR_MIN_AREA` are reclassified as birds.
+
+---
+
+## Classifier Backends
+
+The species classifier is selected by `CLASSIFIER_BACKEND`:
+
+| Backend | Model | Approach | Notes |
+|---------|-------|----------|-------|
+| `tfhub` | Google AIY Birds V1 | 965-class softmax | Fast, no GPU needed |
+| `bioclip` | imageomics/bioclip | Zero-shot CLIP | Precomputes text embeddings for species list |
+| `nabirds` | Any HF AutoModelForImageClassification | Fine-tuned CNN/ViT | Model ID set by `NABIRDS_MODEL` |
+
+All backends accept a `species_list.txt` allowlist to restrict predictions to expected backyard species.
 
 ---
 
 ## MQTT Topics
 
-| Topic | Publisher | Description |
-|-------|-----------|-------------|
-| `frigate/events` | Frigate | Raw detection event JSON (all labels) |
-| `birdfeeder/detection` | bird-classifier | Every confirmed species detection |
-| `birdfeeder/detection/{species-slug}` | bird-classifier | Per-species detections (e.g. `birdfeeder/detection/northern-cardinal`) |
-| `birdfeeder/new_species` | bird-classifier | First time a species is seen (this season) |
-| `birdfeeder/predator_alert` | bird-classifier | Cat detection near feeder |
-| `birdfeeder/unknown` | bird-classifier | Low-confidence detections needing review |
-| `birdfeeder/daily_summary` | bird-classifier | End-of-day JSON summary (future) |
+| Topic | Description |
+|-------|-------------|
+| `birdfeeder/detection` | Every confirmed species detection |
+| `birdfeeder/detection/{species-slug}` | Per-species topic (e.g. `northern-cardinal`) |
+| `birdfeeder/new_species` | First time a species is seen this session |
+| `birdfeeder/predator_alert` | Cat/dog/bear detected above confidence threshold |
+| `birdfeeder/unknown` | Low-confidence detections saved for review |
 
 ---
 
@@ -101,16 +93,39 @@ A single bird visit generates multiple Frigate events (new, update, end). Proces
 ```
 data/
 ├── snapshots/
-│   └── 2026-02-12/
-│       ├── 2026-02-12T08-15-23_northern-cardinal_0.91.jpg
-│       └── 2026-02-12T08-17-01_blue-jay_0.88.jpg
-├── corrections/          # Low-confidence snapshots for human review
-│   └── 1707732923.456-abcdef.jpg
-├── detections.csv        # Flat CSV log (append-only)
-└── detections.db         # SQLite database (indexed, queryable)
+│   └── YYYY-MM-DD/
+│       └── {timestamp}_{species-slug}_{confidence}.jpg
+├── corrections/        # Low-confidence crops for manual review
+├── detections.csv      # Append-only flat log
+└── detections.db       # SQLite (indexed by timestamp, species, date)
 ```
 
-Snapshot filenames follow the pattern: `{ISO_timestamp}_{species-slug}_{confidence}.jpg`
+---
+
+## Source Layout
+
+```
+bird-detector/
+├── pipeline.py           # Main loop: motion → YOLO → classifier → log/MQTT
+├── detector.py           # BirdDetector (YOLOv8)
+├── motion.py             # MotionDetector (MOG2)
+├── classifier.py         # TFHub AIY Birds V1 backend
+├── classifier_bioclip.py # BioCLIP zero-shot backend
+├── classifier_nabirds.py # HuggingFace backend
+├── logger.py             # CSV + SQLite dual-write logger
+├── config.py             # All settings from environment variables
+└── species_list.txt      # Allowlist of expected backyard species
+
+scripts/
+├── extract_yolo_crops.py # Extract YOLO crops from a video for testing
+├── test_photos.py        # Compare classifier backends on still images
+├── test_pipeline.py      # Run the full pipeline on a video file
+├── debug_view.py         # Live debug overlay (MJPEG stream on :8090)
+└── export_csv.py         # Export detections to CSV
+
+docker-compose.opencv.yml       # Main stack (mosquitto + bird-detector)
+docker-compose.opencv.test.yml  # Test overlay (adds mediamtx RTSP loop)
+```
 
 ---
 
@@ -118,21 +133,6 @@ Snapshot filenames follow the pattern: `{ISO_timestamp}_{species-slug}_{confiden
 
 | Port | Service | Purpose |
 |------|---------|---------|
-| 1883 | Mosquitto | MQTT (plaintext, LAN only) |
-| 5000 | Frigate | Web UI and REST API |
-| 8554 | Frigate | RTSP re-stream |
-| 8555 | Frigate | WebRTC (for browser live view) |
-
-All ports are bound to localhost (`127.0.0.1`) by default on the host — accessible from the LAN via the laptop's IP address.
-
----
-
-## Planned Phases
-
-| Phase | Status | Description |
-|-------|--------|-------------|
-| 1 — Infrastructure | Complete | Docker Compose, Mosquitto, Frigate |
-| 2 — Classification | Complete | Two-stage bird-classifier service |
-| 3 — Home Assistant | Planned | Lovelace dashboard, automations, alerts |
-| 4 — Audio (BirdNET) | Planned | Audio-based species ID from Frigate recordings |
-| 5 — Analysis | Planned | Seasonal trends, peak hours, diversity reports |
+| 1883 | Mosquitto | MQTT |
+| 8090 | debug-viewer | Live MJPEG debug stream (debug profile only) |
+| 8556 | mediamtx | RTSP test stream (test overlay only) |
