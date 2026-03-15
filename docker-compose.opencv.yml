@@ -8,8 +8,6 @@
 #   VIDEO_SOURCE=rtsp://<user>:<pass>@<camera-ip>:554/stream2
 #   MQTT_USER=...
 #   MQTT_PASSWORD=...
-#   LATITUDE=...
-#   LONGITUDE=...
 
 services:
   mosquitto:
@@ -31,7 +29,6 @@ services:
     build: ./bird-detector
     volumes:
       - ./data:/data
-      # Persist downloaded model weights across restarts
       - model-cache:/root/.cache
     environment:
       VIDEO_SOURCE: "${VIDEO_SOURCE}"
@@ -48,8 +45,16 @@ services:
       YOLO_CONFIDENCE: "${YOLO_CONFIDENCE:-0.25}"
       DETECTION_MIN_AREA: "${DETECTION_MIN_AREA:-500}"
       DETECTION_MAX_AREA: "${DETECTION_MAX_AREA:-80000}"
-      # Classification
-      LOCAL_MODEL_CONFIDENCE_THRESHOLD: "${LOCAL_MODEL_CONFIDENCE_THRESHOLD:-0.85}"
+      PREDATOR_MIN_CONFIDENCE: "${PREDATOR_MIN_CONFIDENCE:-0.70}"
+      PREDATOR_MIN_AREA: "${PREDATOR_MIN_AREA:-15000}"
+      # Species classifier — set CLASSIFIER_BACKEND to switch models:
+      #   tfhub   : Google AIY Birds V1 (default, no extra deps)
+      #   bioclip : BioCLIP zero-shot (pip install open-clip-torch)
+      #   nabirds : HuggingFace ViT/EfficientNet (pip install transformers)
+      CLASSIFIER_BACKEND: "${CLASSIFIER_BACKEND:-tfhub}"
+      BIOCLIP_MODEL: "${BIOCLIP_MODEL:-hf-hub:imageomics/bioclip}"
+      NABIRDS_MODEL: "${NABIRDS_MODEL:-chriamue/bird-species-classifier}"
+      # Thresholds
       MIN_CONFIDENCE_LOG: "${MIN_CONFIDENCE_LOG:-0.3}"
       MIN_CONFIDENCE_NOTIFY: "${MIN_CONFIDENCE_NOTIFY:-0.7}"
       DETECTION_COOLDOWN_SEC: "${DETECTION_COOLDOWN_SEC:-10.0}"
@@ -58,9 +63,6 @@ services:
       MQTT_PORT: "1883"
       MQTT_USER: "${MQTT_USER}"
       MQTT_PASSWORD: "${MQTT_PASSWORD}"
-      # Location
-      LATITUDE: "${LATITUDE}"
-      LONGITUDE: "${LONGITUDE}"
     deploy:
       resources:
         reservations:

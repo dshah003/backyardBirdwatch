@@ -1,8 +1,4 @@
-"""Dual-write detection logger: CSV + SQLite.
-
-Schema matches the existing bird-classifier logger so both services can
-share the same data files interchangeably.
-"""
+"""Dual-write detection logger: CSV + SQLite."""
 
 import csv
 import logging
@@ -30,7 +26,6 @@ CSV_FIELDS = [
     "temperature_f",
     "snapshot_path",
     "audio_path",
-    "frigate_event_id",
     "reviewed",
     "corrected_species",
 ]
@@ -49,7 +44,6 @@ CREATE TABLE IF NOT EXISTS detections (
     temperature_f REAL,
     snapshot_path TEXT,
     audio_path TEXT,
-    frigate_event_id TEXT,
     reviewed INTEGER DEFAULT 0,
     corrected_species TEXT
 );
@@ -65,11 +59,11 @@ _INSERT = """
 INSERT INTO detections (
     timestamp, species_common, species_scientific, confidence, source,
     classifier, duration_sec, count, temperature_f, snapshot_path,
-    audio_path, frigate_event_id, reviewed, corrected_species
+    audio_path, reviewed, corrected_species
 ) VALUES (
     :timestamp, :species_common, :species_scientific, :confidence, :source,
     :classifier, :duration_sec, :count, :temperature_f, :snapshot_path,
-    :audio_path, :frigate_event_id, :reviewed, :corrected_species
+    :audio_path, :reviewed, :corrected_species
 )
 """
 
@@ -88,7 +82,6 @@ class DetectionRecord:
     temperature_f: float | None = None
     snapshot_path: str | None = None
     audio_path: str | None = None
-    frigate_event_id: str | None = None
     reviewed: int = 0
     corrected_species: str | None = None
     date: str = field(init=False)
@@ -137,7 +130,6 @@ class DetectionLogger:
             conn.close()
 
     def log(self, record: DetectionRecord) -> None:
-        """Write record to CSV and SQLite. Logs a summary line at INFO."""
         self._write_csv(record)
         self._write_db(record)
         log.info(
