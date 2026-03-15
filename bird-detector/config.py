@@ -22,7 +22,7 @@ YOLO_CONFIDENCE: float = float(os.environ.get("YOLO_CONFIDENCE", "0.25"))
 
 # Bounding-box area bounds (px²) for valid detections.
 DETECTION_MIN_AREA: int = int(os.environ.get("DETECTION_MIN_AREA", "500"))
-DETECTION_MAX_AREA: int = int(os.environ.get("DETECTION_MAX_AREA", "80000"))
+DETECTION_MAX_AREA: int = int(os.environ.get("DETECTION_MAX_AREA", "800000"))
 
 # Minimum YOLO confidence to trigger a predator alert.
 # A real cat in frame typically scores 0.7+; raised from 0.6 to reduce
@@ -45,6 +45,12 @@ BIOCLIP_MODEL: str = os.environ.get("BIOCLIP_MODEL", "hf-hub:imageomics/bioclip"
 
 # HuggingFace model ID — only used when CLASSIFIER_BACKEND=nabirds
 NABIRDS_MODEL: str = os.environ.get("NABIRDS_MODEL", "chriamue/bird-species-classifier")
+
+# Path to fine-tuned EfficientNet weights — only used when CLASSIFIER_BACKEND=efficientnet
+# Train with: python scripts/train_efficientnet.py --data-dir training-data/
+EFFICIENTNET_MODEL_PATH: Path = Path(
+    os.environ.get("EFFICIENTNET_MODEL_PATH", "/data/models/feeder_birds.pt")
+)
 
 # Path to allowlist of common names (one per line).
 # Restricts predictions to expected backyard species.

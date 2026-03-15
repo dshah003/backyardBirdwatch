@@ -84,6 +84,13 @@ def _load_classifier(backend: str):
         elif backend == "nabirds":
             from classifier_nabirds import NABirdsClassifier
             clf = NABirdsClassifier(species_list_path=species_list)
+        elif backend == "efficientnet":
+            from classifier_efficientnet import EfficientNetClassifier
+            model_path = Path(os.environ.get(
+                "EFFICIENTNET_MODEL_PATH",
+                str(BIRD_DETECTOR.parent / "data" / "models" / "feeder_birds.pt"),
+            ))
+            clf = EfficientNetClassifier(model_path=model_path)
         else:
             from classifier import SpeciesClassifier
             clf = SpeciesClassifier(species_list_path=species_list)
@@ -296,7 +303,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--backend",
-        choices=["tfhub", "bioclip", "nabirds"],
+        choices=["tfhub", "bioclip", "nabirds", "efficientnet"],
         default="tfhub",
         help="Classifier backend (default: tfhub)",
     )

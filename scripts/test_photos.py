@@ -66,7 +66,7 @@ logging.basicConfig(
 log = logging.getLogger("test-photos")
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
-ALL_BACKENDS = ("tfhub", "bioclip", "nabirds")
+ALL_BACKENDS = ("tfhub", "bioclip", "nabirds", "efficientnet")
 
 _COLOUR_HIGH = (34, 197, 94)
 _COLOUR_MED  = (234, 179, 8)
@@ -97,6 +97,12 @@ def _load_classifier(backend: str, species_list: Path):
         elif backend == "nabirds":
             from classifier_nabirds import NABirdsClassifier
             clf = NABirdsClassifier(species_list_path=species_list)
+        elif backend == "efficientnet":
+            import os
+            from pathlib import Path
+            from classifier_efficientnet import EfficientNetClassifier
+            model_path = Path(os.environ.get("EFFICIENTNET_MODEL_PATH", "data/models/feeder_birds.pt"))
+            clf = EfficientNetClassifier(model_path=model_path)
         else:
             log.error("Unknown backend: %r", backend)
             return None
@@ -340,7 +346,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--backend",
-        choices=["tfhub", "bioclip", "nabirds", "all"],
+        choices=["tfhub", "bioclip", "nabirds", "efficientnet", "all"],
         default="all",
         help="Classifier backend to use (default: all — runs all three for comparison)",
     )

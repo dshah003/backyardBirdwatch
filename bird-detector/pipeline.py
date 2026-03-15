@@ -160,6 +160,10 @@ def _make_classifier():
             model_name=config.NABIRDS_MODEL,
             species_list_path=config.SPECIES_LIST_PATH,
         )
+    elif backend == "efficientnet":
+        from classifier_efficientnet import EfficientNetClassifier
+        logger.info("Using classifier backend: EfficientNet (%s)", config.EFFICIENTNET_MODEL_PATH)
+        return EfficientNetClassifier(model_path=config.EFFICIENTNET_MODEL_PATH)
     else:
         if backend != "tfhub":
             logger.warning(
