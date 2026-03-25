@@ -5,21 +5,26 @@ Loop:
   2. MotionDetector flags frames with significant foreground movement.
   3. On motion → BirdDetector (YOLOv8n) scans the full frame for bird/cat.
   4. For each 'bird' detection → species classifier (backend set by
-     CLASSIFIER_BACKEND: 'tfhub' | 'bioclip' | 'nabirds').
+     CLASSIFIER_BACKEND: 'tfhub' | 'bioclip' | 'nabirds' | 'efficientnet').
   5. Results above MIN_CONFIDENCE_LOG are written to CSV + SQLite and
      published to MQTT.  A per-region cooldown prevents duplicate entries
      for the same bird sitting at the feeder.
 
 Run standalone (no Docker):
-    VIDEO_SOURCE=path/to/video.mp4 python pipeline.py
+    python pipeline.py
+    python pipeline.py --debug          # MJPEG viewer at http://localhost:8090
+    python pipeline.py --debug-port 8091
 
 Or via Docker Compose (see docker-compose.opencv.yml).
 """
 
+import argparse
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import cv2
@@ -36,6 +41,117 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 logger = logging.getLogger("pipeline")
+
+
+# ── MJPEG debug server (optional) ─────────────────────────────────────────
+
+_FONT           = cv2.FONT_HERSHEY_SIMPLEX
+_COLOR_BIRD     = (255, 120,   0)
+_COLOR_PREDATOR = (  0,   0, 220)
+_COLOR_MOTION   = (  0, 210,   0)
+
+_INDEX_HTML = b"""<!DOCTYPE html><html>
+<head><title>Bird Detector</title>
+<style>body{margin:0;background:#111;display:flex;flex-direction:column;
+align-items:center;justify-content:center;min-height:100vh}
+img{max-width:100%}p{color:#888;font-family:monospace;margin:8px 0 0;font-size:13px}
+</style></head>
+<body><img src="/stream">
+<p>&#9646;&nbsp;green&nbsp;=&nbsp;motion&nbsp;&nbsp;
+&#9646;&nbsp;orange&nbsp;=&nbsp;bird&nbsp;&nbsp;
+&#9646;&nbsp;red&nbsp;=&nbsp;predator</p></body></html>"""
+
+
+class _MJPEGServer:
+    """Serves annotated frames as an MJPEG stream on a background thread."""
+
+    def __init__(self, port: int) -> None:
+        self._port = port
+        self._jpeg: bytes = b""
+        self._seq: int = 0
+        self._cond = threading.Condition()
+
+    def start(self) -> None:
+        server = ThreadingHTTPServer(("0.0.0.0", self._port), self._make_handler())
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        logger.info("Debug viewer → http://localhost:%d/", self._port)
+
+    def push(self, frame: np.ndarray) -> None:
+        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        with self._cond:
+            self._jpeg = buf.tobytes()
+            self._seq += 1
+            self._cond.notify_all()
+
+    def _make_handler(self):
+        srv = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path in ("/", "/index.html"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(_INDEX_HTML)))
+                    self.end_headers()
+                    self.wfile.write(_INDEX_HTML)
+                elif self.path == "/stream":
+                    self.send_response(200)
+                    self.send_header(
+                        "Content-Type", "multipart/x-mixed-replace; boundary=frame"
+                    )
+                    self.end_headers()
+                    last = -1
+                    try:
+                        while True:
+                            with srv._cond:
+                                srv._cond.wait_for(
+                                    lambda: srv._seq != last, timeout=2.0
+                                )
+                                jpeg, last = srv._jpeg, srv._seq
+                            if not jpeg:
+                                continue
+                            part = (
+                                b"--frame\r\nContent-Type: image/jpeg\r\n"
+                                + f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
+                                + jpeg
+                                + b"\r\n"
+                            )
+                            self.wfile.write(part)
+                            self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                else:
+                    self.send_error(404)
+
+            def log_message(self, *_):
+                pass
+
+        return _Handler
+
+
+def _draw_debug(
+    frame: np.ndarray,
+    motion_regions: list,
+    detections: list[Detection],
+    labels: dict,  # Detection → display string
+) -> np.ndarray:
+    display = frame.copy()
+    for region in motion_regions:
+        x, y, w, h = cv2.boundingRect(region)
+        cv2.rectangle(display, (x, y), (x + w, y + h), _COLOR_MOTION, 1)
+    for det in detections:
+        color = _COLOR_PREDATOR if det.label != "bird" else _COLOR_BIRD
+        cv2.rectangle(display, (det.x1, det.y1), (det.x2, det.y2), color, 2)
+        text = labels.get(det, f"{det.label} {det.confidence:.2f}")
+        (tw, th), bl = cv2.getTextSize(text, _FONT, 0.52, 1)
+        bg_top = max(det.y1 - th - bl - 4, 0)
+        cv2.rectangle(display, (det.x1, bg_top), (det.x1 + tw + 4, det.y1), color, -1)
+        cv2.putText(
+            display, text, (det.x1 + 2, det.y1 - bl - 2),
+            _FONT, 0.52, (255, 255, 255), 1, cv2.LINE_AA,
+        )
+    return display
 
 
 # ── MQTT (optional — gracefully degraded if broker unavailable) ────────────
@@ -176,9 +292,14 @@ def _make_classifier():
 
 # ── Main loop ─────────────────────────────────────────────────────────────
 
-def run() -> None:
+def run(debug_port: int | None = None) -> None:
     if not config.VIDEO_SOURCE:
         raise SystemExit("VIDEO_SOURCE is not set. Pass an RTSP URL or video file path.")
+
+    mjpeg: _MJPEGServer | None = None
+    if debug_port is not None:
+        mjpeg = _MJPEGServer(debug_port)
+        mjpeg.start()
 
     motion_detector = MotionDetector(
         history=config.MOTION_HISTORY,
@@ -223,6 +344,11 @@ def run() -> None:
             for frame in cap:
                 loop_count += 1
                 motion_regions = motion_detector.detect(frame)
+
+                # In debug mode, push every frame (with or without motion)
+                if mjpeg is not None and not motion_regions:
+                    mjpeg.push(frame)
+
                 if not motion_regions:
                     continue
 
@@ -231,10 +357,13 @@ def run() -> None:
                 )
 
                 detections = bird_detector.detect(frame)
+                debug_labels: dict = {}  # det → label string for debug overlay
+
                 for det in detections:
                     ts = datetime.now(timezone.utc).isoformat()
 
                     if det.label != "bird":
+                        debug_labels[det] = f"{det.label} {det.confidence:.2f}"
                         if det.confidence >= config.PREDATOR_MIN_CONFIDENCE:
                             _handle_predator(det, frame, ts, det_logger, mqtt)
                         else:
@@ -250,9 +379,11 @@ def run() -> None:
                     top = classifier.classify(crop)
                     if not top:
                         logger.debug("Classifier returned no results for detection")
+                        debug_labels[det] = f"bird {det.confidence:.2f}"
                         continue
 
                     species, conf = top[0]
+                    debug_labels[det] = f"{species} {conf:.0%}"
                     logger.info(
                         "Bird detected: %s  yolo_conf=%.2f  species_conf=%.2f",
                         species,
@@ -292,6 +423,9 @@ def run() -> None:
                     if conf >= config.MIN_CONFIDENCE_NOTIFY:
                         slug = species.lower().replace(" ", "-")
                         _mqtt_publish(mqtt, f"{config.TOPIC_DETECTION}/{slug}", payload)
+
+                if mjpeg is not None:
+                    mjpeg.push(_draw_debug(frame, motion_regions, detections, debug_labels))
 
         except StopIteration:
             logger.info("End of video stream — restarting …")
@@ -339,5 +473,23 @@ def _handle_unknown(det: Detection, frame: np.ndarray, ts: str, conf: float, det
     _mqtt_publish(mqtt, config.TOPIC_UNKNOWN, {"timestamp": ts, "confidence": conf})
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Backyard bird detection pipeline.")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable MJPEG debug viewer (default port 8090)",
+    )
+    parser.add_argument(
+        "--debug-port",
+        type=int,
+        default=int(__import__("os").environ.get("DEBUG_PORT", "8090")),
+        metavar="PORT",
+        help="Port for the MJPEG debug viewer (default: 8090)",
+    )
+    args = parser.parse_args()
+    run(debug_port=args.debug_port if args.debug else None)
+
+
 if __name__ == "__main__":
-    run()
+    main()
