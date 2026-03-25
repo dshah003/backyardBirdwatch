@@ -136,18 +136,28 @@ def _classify_image(clf, image_path: Path, top_n: int) -> list[tuple[str, float]
 
 # ── Annotation ────────────────────────────────────────────────────────────────
 
+_MIN_DISPLAY_WIDTH = 400   # upscale crops smaller than this before annotating
+_FONT_SIZE_MAIN    = 16
+_FONT_SIZE_SMALL   = 13
+
+
 def _annotate(
     image_path: Path,
     results_by_backend: dict[str, list[tuple[str, float]]],
     output_path: Path,
     top_n: int,
 ) -> None:
-    """Draw prediction strips on the image and save to output_path."""
+    """Draw prediction panel below the image and save to output_path."""
     from PIL import Image, ImageDraw, ImageFont
 
     img = Image.open(image_path).convert("RGB")
-    draw = ImageDraw.Draw(img)
     W, H = img.size
+
+    # Upscale tiny crops so the output is always readable.
+    if W < _MIN_DISPLAY_WIDTH:
+        scale = _MIN_DISPLAY_WIDTH / W
+        img = img.resize((int(W * scale), int(H * scale)), Image.LANCZOS)
+        W, H = img.size
 
     font_main = font_small = None
     for fp in [
@@ -157,16 +167,29 @@ def _annotate(
     ]:
         if Path(fp).exists():
             try:
-                font_main  = ImageFont.truetype(fp, max(14, H // 24))
-                font_small = ImageFont.truetype(fp, max(11, H // 36))
+                font_main  = ImageFont.truetype(fp, _FONT_SIZE_MAIN)
+                font_small = ImageFont.truetype(fp, _FONT_SIZE_SMALL)
             except OSError:
                 pass
             break
     if font_main is None:
         font_main = font_small = ImageFont.load_default()
 
-    # One label strip per backend across the top
-    y_offset = 0
+    # Measure label panel height before compositing.
+    first_results = next(iter(results_by_backend.values()), [])
+    runners = first_results[1:top_n]
+    row_h_main  = _FONT_SIZE_MAIN  + 8
+    row_h_small = _FONT_SIZE_SMALL + 6
+    n_main_rows = sum(1 for r in results_by_backend.values() if r)
+    panel_h = n_main_rows * row_h_main + len(runners) * row_h_small + 8
+
+    # Composite: original image on top, label panel below.
+    canvas = Image.new("RGB", (W, H + panel_h), (20, 20, 20))
+    canvas.paste(img, (0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    # One row per backend.
+    y = H + 4
     for backend, results in results_by_backend.items():
         if not results:
             continue
@@ -175,31 +198,23 @@ def _annotate(
         lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
         fg = _TEXT_DARK if lum > 140 else _TEXT_LIGHT
 
+        draw.rectangle([(0, y - 2), (W, y + row_h_main - 2)], fill=bg)
         text = f"[{backend}]  {species}  {conf:.0%}"
-        bb = draw.textbbox((0, 0), text, font=font_main)
-        strip_h = (bb[3] - bb[1]) + 10
-        draw.rectangle([(0, y_offset), (W, y_offset + strip_h)], fill=bg)
-        draw.text((6, y_offset + 5), text, fill=fg, font=font_main)
-        y_offset += strip_h
+        draw.text((6, y), text, fill=fg, font=font_main)
+        y += row_h_main
 
-    # Candidate runners-up at the bottom (from the first backend only)
-    first_results = next(iter(results_by_backend.values()), [])
-    runners = first_results[1:top_n]
-    if runners:
-        row_h = max(16, H // 32)
-        panel_h = row_h * len(runners) + 6
-        draw.rectangle([(0, H - panel_h), (W, H)], fill=(20, 20, 20))
-        for i, (sp, cf) in enumerate(runners):
-            y = H - panel_h + 4 + i * row_h
-            draw.text(
-                (4, y),
-                f"  #{i + 2}  {sp}  {cf:.0%}",
-                fill=(220, 220, 220),
-                font=font_small,
-            )
+    # Runner-up candidates below the backend rows.
+    for i, (sp, cf) in enumerate(runners):
+        draw.text(
+            (6, y),
+            f"#{i + 2}  {sp}  {cf:.0%}",
+            fill=(200, 200, 200),
+            font=font_small,
+        )
+        y += row_h_small
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(output_path, quality=92)
+    canvas.save(output_path, quality=92)
 
 
 # ── Summary printing ──────────────────────────────────────────────────────────
@@ -347,8 +362,8 @@ def main() -> None:
     parser.add_argument(
         "--backend",
         choices=["tfhub", "bioclip", "nabirds", "efficientnet", "all"],
-        default="all",
-        help="Classifier backend to use (default: all — runs all three for comparison)",
+        default="efficientnet",
+        help="Classifier backend to use (default: efficientnet)",
     )
     parser.add_argument(
         "--input-dir",

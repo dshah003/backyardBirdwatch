@@ -21,3 +21,6 @@ __pycache__/
 *.db
 .claude
 CLAUDE.md
+test-photos-results/*
+yolo-crops/
+*.csv
