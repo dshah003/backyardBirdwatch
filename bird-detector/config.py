@@ -52,7 +52,7 @@ DETECTION_MAX_AREA: int = int(os.environ.get("DETECTION_MAX_AREA", "800000"))
 # Minimum YOLO confidence to trigger a predator alert.
 # A real cat in frame typically scores 0.7+; raised from 0.6 to reduce
 # small-bird false positives on the predator path.
-PREDATOR_MIN_CONFIDENCE: float = float(os.environ.get("PREDATOR_MIN_CONFIDENCE", "0.70"))
+PREDATOR_MIN_CONFIDENCE: float = float(os.environ.get("PREDATOR_MIN_CONFIDENCE", "0.50"))
 
 # If a predator-class detection (cat/dog/bear) has a bounding-box area
 # smaller than this, it is almost certainly a small bird misclassified by
