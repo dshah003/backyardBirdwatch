@@ -3,14 +3,39 @@
 import os
 from pathlib import Path
 
+# Load .env from the project root if it exists.
+# Environment variables already set in the shell take precedence.
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _key, _, _val = _line.partition("=")
+            os.environ.setdefault(_key.strip(), _val.strip().strip('"').strip("'"))
+
 
 # ── Video source ────────────────────────────────────────────────────────────
-VIDEO_SOURCE: str = os.environ.get("VIDEO_SOURCE", "")
+# If VIDEO_SOURCE is not set explicitly, construct it from camera credentials.
+def _build_video_source() -> str:
+    src = os.environ.get("VIDEO_SOURCE", "")
+    if src:
+        return src
+    ip   = os.environ.get("CAMERA_IP", "")
+    user = os.environ.get("RTSP_USER", "")
+    pw   = os.environ.get("RTSP_PASSWORD", "")
+    if ip:
+        return f"rtsp://{user}:{pw}@{ip}:554/stream1"
+    return ""
+
+VIDEO_SOURCE: str = _build_video_source()
+
 CAPTURE_FPS: int = int(os.environ.get("CAPTURE_FPS", "5"))
 VIDEO_LOOP: bool = os.environ.get("VIDEO_LOOP", "true").lower() == "true"
 
 # ── Motion detection (MOG2 background subtractor) ───────────────────────────
-MOTION_HISTORY: int = int(os.environ.get("MOTION_HISTORY", "300"))
+MOTION_HISTORY: int = int(os.environ.get("MOTION_HISTORY", "100"))
 MOTION_VAR_THRESHOLD: float = float(os.environ.get("MOTION_VAR_THRESHOLD", "32"))
 MOTION_MIN_AREA: int = int(os.environ.get("MOTION_MIN_AREA", "800"))
 MOTION_MAX_AREA: int = int(os.environ.get("MOTION_MAX_AREA", "120000"))
@@ -27,7 +52,7 @@ DETECTION_MAX_AREA: int = int(os.environ.get("DETECTION_MAX_AREA", "800000"))
 # Minimum YOLO confidence to trigger a predator alert.
 # A real cat in frame typically scores 0.7+; raised from 0.6 to reduce
 # small-bird false positives on the predator path.
-PREDATOR_MIN_CONFIDENCE: float = float(os.environ.get("PREDATOR_MIN_CONFIDENCE", "0.70"))
+PREDATOR_MIN_CONFIDENCE: float = float(os.environ.get("PREDATOR_MIN_CONFIDENCE", "0.50"))
 
 # If a predator-class detection (cat/dog/bear) has a bounding-box area
 # smaller than this, it is almost certainly a small bird misclassified by
@@ -38,7 +63,8 @@ PREDATOR_MIN_AREA: int = int(os.environ.get("PREDATOR_MIN_AREA", "15000"))
 
 # ── Species classifier ───────────────────────────────────────────────────────
 # Which backend to use: "tfhub" | "bioclip" | "nabirds"
-CLASSIFIER_BACKEND: str = os.environ.get("CLASSIFIER_BACKEND", "tfhub")
+CLASSIFIER_BACKEND: str = os.environ.get("CLASSIFIER_BACKEND", "efficientnet")
+# CLASSIFIER_BACKEND: str = os.environ.get("CLASSIFIER_BACKEND", "tfhub")
 
 # BioCLIP (open_clip) model string — only used when CLASSIFIER_BACKEND=bioclip
 BIOCLIP_MODEL: str = os.environ.get("BIOCLIP_MODEL", "hf-hub:imageomics/bioclip")
@@ -48,9 +74,12 @@ NABIRDS_MODEL: str = os.environ.get("NABIRDS_MODEL", "chriamue/bird-species-clas
 
 # Path to fine-tuned EfficientNet weights — only used when CLASSIFIER_BACKEND=efficientnet
 # Train with: python scripts/train_efficientnet.py --data-dir training-data/
-EFFICIENTNET_MODEL_PATH: Path = Path(
-    os.environ.get("EFFICIENTNET_MODEL_PATH", "/data/models/feeder_birds.pt")
-)
+# EFFICIENTNET_MODEL_PATH: Path = Path(
+#     os.environ.get("EFFICIENTNET_MODEL_PATH", "/data/models/feeder_birds.pt")
+# )
+
+EFFICIENTNET_MODEL_PATH: Path = Path("/home/radar/backyardBirdwatch/data/models/feeder_birds.pt")
+
 
 # Path to allowlist of common names (one per line).
 # Restricts predictions to expected backyard species.

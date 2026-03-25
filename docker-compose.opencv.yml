@@ -48,12 +48,14 @@ services:
       PREDATOR_MIN_CONFIDENCE: "${PREDATOR_MIN_CONFIDENCE:-0.70}"
       PREDATOR_MIN_AREA: "${PREDATOR_MIN_AREA:-15000}"
       # Species classifier — set CLASSIFIER_BACKEND to switch models:
-      #   tfhub   : Google AIY Birds V1 (default, no extra deps)
-      #   bioclip : BioCLIP zero-shot (pip install open-clip-torch)
-      #   nabirds : HuggingFace ViT/EfficientNet (pip install transformers)
+      #   tfhub        : Google AIY Birds V1 (default, no extra deps)
+      #   bioclip      : BioCLIP zero-shot (pip install open-clip-torch)
+      #   nabirds      : HuggingFace ViT/EfficientNet (pip install transformers)
+      #   efficientnet : Fine-tuned EfficientNet-B0 (train with scripts/train_efficientnet.py)
       CLASSIFIER_BACKEND: "${CLASSIFIER_BACKEND:-tfhub}"
       BIOCLIP_MODEL: "${BIOCLIP_MODEL:-hf-hub:imageomics/bioclip}"
       NABIRDS_MODEL: "${NABIRDS_MODEL:-chriamue/bird-species-classifier}"
+      EFFICIENTNET_MODEL_PATH: "${EFFICIENTNET_MODEL_PATH:-/data/models/feeder_birds.pt}"
       # Thresholds
       MIN_CONFIDENCE_LOG: "${MIN_CONFIDENCE_LOG:-0.3}"
       MIN_CONFIDENCE_NOTIFY: "${MIN_CONFIDENCE_NOTIFY:-0.7}"

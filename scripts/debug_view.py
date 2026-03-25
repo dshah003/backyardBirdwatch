@@ -28,14 +28,19 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 
+# Bootstrap: load .env and build VIDEO_SOURCE via config.py
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bird-detector"))
+import config  # noqa: E402 — populates os.environ from .env
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
-VIDEO_SOURCE: str = os.environ.get("VIDEO_SOURCE", "")
+VIDEO_SOURCE: str = config.VIDEO_SOURCE or os.environ.get("VIDEO_SOURCE", "")
 DEBUG_PORT: int = int(os.environ.get("DEBUG_PORT", "8090"))
 DEBUG_CLASSIFY: bool = os.environ.get("DEBUG_CLASSIFY", "").lower() == "true"
 YOLO_MODEL: str = os.environ.get("YOLO_MODEL", "yolov8n.pt")

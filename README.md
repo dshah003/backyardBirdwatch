@@ -1,6 +1,6 @@
 # Backyard Bird Feeder Detection System
 
-A local, privacy-first bird detection and species identification system for a backyard feeder. The system reads an RTSP stream from an IP camera, detects birds and predators using YOLOv8, identifies species using a swappable classifier backend, logs all activity to CSV/SQLite, and publishes events to MQTT for downstream automations.  Everything runs on a single Ubuntu laptop — no cloud services required.
+A local, privacy-first bird detection and species identification system for a backyard feeder. The system reads an RTSP stream from an IP camera, detects birds and predators using YOLOv8, identifies species using a swappable classifier backend, logs all activity to CSV/SQLite, and publishes events to MQTT for downstream automations. Everything runs on a single Ubuntu laptop — no cloud services required.
 
 ```
 Tapo C200 ──RTSP──▶ bird-detector ──MQTT──▶ birdfeeder/* topics
@@ -34,11 +34,15 @@ nano .env
 
 Required fields in `.env`:
 
-| Variable | Example |
-|----------|---------|
-| `VIDEO_SOURCE` | `rtsp://user:pass@192.168.1.100:554/stream2` |
-| `MQTT_USER` | `birdfeeder` |
-| `MQTT_PASSWORD` | a strong password |
+| Variable | Example | Notes |
+|----------|---------|-------|
+| `CAMERA_IP` | `192.168.1.171` | IP address of your camera |
+| `RTSP_USER` | `admin` | Camera RTSP username |
+| `RTSP_PASSWORD` | `yourpassword` | Camera RTSP password |
+| `MQTT_USER` | `birdfeeder` | Mosquitto username |
+| `MQTT_PASSWORD` | a strong password | Mosquitto password |
+
+`VIDEO_SOURCE` is built automatically from the camera credentials as `rtsp://<RTSP_USER>:<RTSP_PASSWORD>@<CAMERA_IP>:554/stream1`. Set it explicitly in `.env` only if you need a different URL.
 
 ### 2. Start the Stack
 
@@ -77,44 +81,83 @@ sqlite3 data/detections.db \
 
 ---
 
-## Testing with a Sample Video
+## Running Without Docker
+
+Useful for development and testing.
 
 ```bash
-# Loop a local video through mediamtx as a fake RTSP stream
-cp /path/to/footage.mp4 test-videos/sample.mp4
-docker compose -f docker-compose.opencv.yml -f docker-compose.opencv.test.yml up -d
+# Set up a virtual environment
+python -m venv venv && source venv/bin/activate
+pip install -r bird-detector/requirements.txt
 
-# Tail results
-tail -f data/detections.csv
+# Run the pipeline
+python bird-detector/pipeline.py
+
+# Run with the MJPEG debug viewer at http://localhost:8090
+python bird-detector/pipeline.py --debug
+
+# Custom debug port
+python bird-detector/pipeline.py --debug --debug-port 8091
+```
+
+The pipeline reads `.env` automatically — no need to export variables manually.
+
+---
+
+## Debug Viewer
+
+Pass `--debug` to `pipeline.py` to start an MJPEG stream at `http://localhost:8090`. It reuses the frames already processed by the pipeline (no duplicate YOLO/motion work).
+
+The overlay shows:
+- **Green boxes** — motion regions
+- **Orange boxes** — bird detections with species + confidence
+- **Red boxes** — predator (cat/dog/bear) detections
+
+To expose the viewer when running via Docker, add to `docker-compose.opencv.yml`:
+
+```yaml
+bird-detector:
+  command: python pipeline.py --debug
+  ports:
+    - "8090:8090"
 ```
 
 ---
 
 ## Classifier Backends
 
-The species classifier is swappable via `CLASSIFIER_BACKEND` in `.env` (or the Docker Compose env):
+The species classifier is swappable via `CLASSIFIER_BACKEND` in `.env`. The default is `efficientnet` — a model fine-tuned on crops from your own feeder.
 
-| Backend | Setting | Accuracy | Extra deps |
-|---------|---------|----------|------------|
-| Google AIY Birds V1 (TFHub) | `tfhub` | Good | `tensorflow tensorflow-hub` |
-| BioCLIP (zero-shot) | `bioclip` | Better | `open-clip-torch` |
-| HuggingFace ViT/EfficientNet | `nabirds` | Best | `transformers torch` |
+| Backend | Setting | Notes |
+|---------|---------|-------|
+| Fine-tuned EfficientNet-B0 | `efficientnet` | **Recommended.** Train on your own feeder data. |
+| Google AIY Birds V1 (TFHub) | `tfhub` | 965-class MobileNet. Confidence too low on feeder crops. |
+| BioCLIP (zero-shot) | `bioclip` | Uniform predictions across similar species. Not suitable. |
+| HuggingFace NABirds | `nabirds` | Missing common backyard species (Blue Jay, Tufted Titmouse). |
+
+### Training the EfficientNet classifier
 
 ```bash
-# In .env
-CLASSIFIER_BACKEND=bioclip
+# 1. Collect labeled crops (run YOLO on your footage)
+python scripts/extract_yolo_crops.py path/to/feeder_video.mp4
 
-# Or per-run without Docker
-CLASSIFIER_BACKEND=bioclip python bird-detector/pipeline.py
+# 2. Sort crops into species folders
+mkdir -p training-data/"Blue Jay" training-data/"Tufted Titmouse"
+# move crops from yolo-crops/bird/ into the correct folder
+
+# 3. Train (requires ~20+ images per species)
+python scripts/train_efficientnet.py --data-dir training-data/
+
+# 4. Model saved to data/models/feeder_birds.pt
 ```
 
-The `NABIRDS_MODEL` variable selects which HuggingFace checkpoint to use (default: `chriamue/bird-species-classifier`).
+Set `EFFICIENTNET_MODEL_PATH` in `.env` if you save the model elsewhere.
 
 ---
 
 ## Testing Scripts
 
-All scripts live in `scripts/` and run without Docker.
+All scripts live in `scripts/` and run without Docker. Activate your venv first.
 
 ### Extract YOLO crops from a video
 
@@ -125,20 +168,18 @@ python scripts/extract_yolo_crops.py path/to/video.mp4
 # Sample faster, save annotated full frames too
 python scripts/extract_yolo_crops.py video.mp4 --fps 2 --save-frames
 
-# Run YOLO on every frame (disable motion gate)
+# Disable motion gate — run YOLO on every frame
 python scripts/extract_yolo_crops.py video.mp4 --no-motion
 
 # Output goes to yolo-crops/bird/ and yolo-crops/cat/ by default
 ```
 
-Use this to audit YOLO's accuracy and build a test image set.
-
 ### Compare classifier backends on still images
 
 ```bash
 # Drop bird crop JPEGs into test-photos/ then:
-python scripts/test_photos.py                   # compare all three backends
-python scripts/test_photos.py --backend bioclip # single backend
+python scripts/test_photos.py                      # compare all backends
+python scripts/test_photos.py --backend efficientnet
 python scripts/test_photos.py --input-dir yolo-crops/bird/
 ```
 
@@ -151,7 +192,7 @@ Produces annotated images + `summary.csv` + `inference_log.json` in `test-photos
 python scripts/test_pipeline.py path/to/video.mp4
 
 # With a specific backend
-python scripts/test_pipeline.py video.mp4 --backend bioclip
+python scripts/test_pipeline.py video.mp4 --backend efficientnet
 
 # On a folder of pre-cropped images (skips YOLO)
 python scripts/test_pipeline.py data/corrections/
@@ -160,19 +201,23 @@ python scripts/test_pipeline.py data/corrections/
 python scripts/test_pipeline.py video.mp4 --no-log
 ```
 
-### Typical test workflow
+### Typical workflow
 
 ```bash
-# 1. Extract and review YOLO detections
+# 1. Record a clip or use existing footage, extract YOLO crops
 python scripts/extract_yolo_crops.py feeder_clip.mp4 --save-frames
 
-# 2. Check yolo-crops/ — move any YOLO false positives to a separate folder
+# 2. Review yolo-crops/ — sort bird crops into training-data/<Species>/
 
-# 3. Compare classifiers on the clean bird crops
-python scripts/test_photos.py --input-dir yolo-crops/bird/
+# 3. Train EfficientNet on your labeled crops
+python scripts/train_efficientnet.py --data-dir training-data/
 
-# 4. Pick the best backend and set it in .env
-echo "CLASSIFIER_BACKEND=bioclip" >> .env
+# 4. Evaluate on test images
+python scripts/test_photos.py --backend efficientnet
+
+# 5. Set in .env and run the live pipeline
+echo "CLASSIFIER_BACKEND=efficientnet" >> .env
+python bird-detector/pipeline.py --debug
 ```
 
 ---
@@ -189,7 +234,7 @@ MotionDetector (MOG2 background subtractor)
     ▼
 BirdDetector (YOLOv8n)
     │
-    ├── "bird"     → SpeciesClassifier (tfhub | bioclip | nabirds)
+    ├── "bird"     → SpeciesClassifier (efficientnet | tfhub | bioclip | nabirds)
     │                    │
     │                    ├── conf ≥ MIN_CONFIDENCE_LOG (0.3)  → log + MQTT
     │                    └── conf < MIN_CONFIDENCE_LOG        → save to corrections/
@@ -208,18 +253,21 @@ All settings are environment variables (`.env` or Docker Compose):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VIDEO_SOURCE` | — | RTSP URL or video file path |
+| `CAMERA_IP` | — | Camera IP address |
+| `RTSP_USER` | — | Camera RTSP username |
+| `RTSP_PASSWORD` | — | Camera RTSP password |
+| `VIDEO_SOURCE` | *(built from above)* | Override RTSP URL or use a video file path |
 | `CAPTURE_FPS` | `5` | Frames per second to sample |
 | `YOLO_MODEL` | `yolov8n.pt` | YOLO model (`yolov8n/s/m.pt`) |
 | `YOLO_CONFIDENCE` | `0.25` | YOLO detection threshold |
 | `PREDATOR_MIN_AREA` | `15000` | Below this px², relabel predator → bird |
-| `PREDATOR_MIN_CONFIDENCE` | `0.70` | Min conf to fire a predator alert |
-| `CLASSIFIER_BACKEND` | `tfhub` | `tfhub` \| `bioclip` \| `nabirds` |
-| `BIOCLIP_MODEL` | `hf-hub:imageomics/bioclip` | BioCLIP model string |
-| `NABIRDS_MODEL` | `chriamue/bird-species-classifier` | HuggingFace model ID |
+| `PREDATOR_MIN_CONFIDENCE` | `0.70` | Min confidence to fire a predator alert |
+| `CLASSIFIER_BACKEND` | `efficientnet` | `efficientnet` \| `tfhub` \| `bioclip` \| `nabirds` |
+| `EFFICIENTNET_MODEL_PATH` | `data/models/feeder_birds.pt` | Path to trained EfficientNet checkpoint |
 | `MIN_CONFIDENCE_LOG` | `0.3` | Minimum confidence to log a detection |
-| `MIN_CONFIDENCE_NOTIFY` | `0.7` | Minimum confidence to publish MQTT |
+| `MIN_CONFIDENCE_NOTIFY` | `0.7` | Minimum confidence to publish MQTT notification |
 | `DETECTION_COOLDOWN_SEC` | `10` | Seconds before re-logging the same region |
+| `DATA_DIR` | `/data` (Docker) | Where to write detections, snapshots, corrections |
 
 See `bird-detector/config.py` for the full list.
 
@@ -231,6 +279,15 @@ See `bird-detector/config.py` for the full list.
 # Live logs
 docker compose -f docker-compose.opencv.yml logs -f bird-detector
 
+# Rebuild after code changes
+docker compose -f docker-compose.opencv.yml up -d --build
+
+# Restart the detector
+docker compose -f docker-compose.opencv.yml restart bird-detector
+
+# Stop everything
+docker compose -f docker-compose.opencv.yml down
+
 # Today's detections
 sqlite3 data/detections.db \
   "SELECT species_common, COUNT(*) as visits FROM detections \
@@ -240,12 +297,6 @@ sqlite3 data/detections.db \
 # Watch MQTT traffic
 docker compose -f docker-compose.opencv.yml exec mosquitto \
   mosquitto_sub -u birdfeeder -P <password> -t "birdfeeder/#" -v
-
-# Export last 7 days to CSV
-python3 scripts/export_csv.py --days 7 --output weekly.csv
-
-# Restart the detector
-docker compose -f docker-compose.opencv.yml restart bird-detector
 ```
 
 ---
@@ -254,13 +305,14 @@ docker compose -f docker-compose.opencv.yml restart bird-detector
 
 ```
 data/
-├── snapshots/        # Archived crops: YYYY-MM-DD/timestamp_species_conf.jpg
-├── corrections/      # Low-confidence detections for manual review
+├── snapshots/        # Cropped detections: YYYY-MM-DD/timestamp_species_conf.jpg
+├── corrections/      # Low-confidence detections for manual review / retraining
+├── models/           # Trained classifier checkpoints (feeder_birds.pt)
 ├── detections.csv    # Append-only flat log
 └── detections.db     # SQLite (indexed, queryable)
 ```
 
-CSV columns: `timestamp, date, time, species_common, species_scientific, confidence, source, classifier, snapshot_path, reviewed, corrected_species`
+CSV columns: `timestamp, date, time, species_common, species_scientific, confidence, source, classifier, duration_sec, count, snapshot_path, reviewed, corrected_species`
 
 ---
 
@@ -280,7 +332,7 @@ CSV columns: `timestamp, date, time, species_common, species_scientific, confide
 |-----------|-----------|
 | Object detection | YOLOv8n (ultralytics) |
 | Motion gating | OpenCV MOG2 |
-| Species classification | TFHub AIY Birds V1 / BioCLIP / HuggingFace |
+| Species classification | EfficientNet-B0 (fine-tuned) / TFHub / BioCLIP / HuggingFace |
 | Video capture | OpenCV |
 | MQTT broker | Eclipse Mosquitto |
 | Logging | CSV + SQLite |

@@ -17,3 +17,7 @@ American Robin
 Brown-headed Cowbird
 Chipping Sparrow
 Song Sparrow
+American Goldfinch
+Brown-headed Cowbird
+Mourning Dove
+
