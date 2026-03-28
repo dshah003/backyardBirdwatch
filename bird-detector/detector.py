@@ -28,7 +28,7 @@ _PREDATOR_CLASSES = {15: "cat", 16: "dog", 21: "bear"}
 _ALL_CLASSES = {_BIRD_CLASS: "bird", **_PREDATOR_CLASSES}
 
 
-@dataclass
+@dataclass(frozen=True)
 class Detection:
     label: str       # "bird", "cat", "dog", or "bear"
     confidence: float

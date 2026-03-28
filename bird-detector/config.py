@@ -74,11 +74,9 @@ NABIRDS_MODEL: str = os.environ.get("NABIRDS_MODEL", "chriamue/bird-species-clas
 
 # Path to fine-tuned EfficientNet weights — only used when CLASSIFIER_BACKEND=efficientnet
 # Train with: python scripts/train_efficientnet.py --data-dir training-data/
-# EFFICIENTNET_MODEL_PATH: Path = Path(
-#     os.environ.get("EFFICIENTNET_MODEL_PATH", "/data/models/feeder_birds.pt")
-# )
-
-EFFICIENTNET_MODEL_PATH: Path = Path("/home/radar/backyardBirdwatch/data/models/feeder_birds.pt")
+EFFICIENTNET_MODEL_PATH: Path = Path(
+    os.environ.get("EFFICIENTNET_MODEL_PATH", "/data/models/feeder_birds.pt")
+)
 
 
 # Path to allowlist of common names (one per line).
