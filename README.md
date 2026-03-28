@@ -47,23 +47,10 @@ Required fields in `.env`:
 ### 2. Start the Stack
 
 ```bash
-# Create the Mosquitto password file before first start
-touch mosquitto/config/password_file
-chmod 644 mosquitto/config/password_file
-
 docker compose -f docker-compose.opencv.yml up -d
-
-# Add the MQTT user
-docker exec -it backyardbirdwatch-mosquitto-1 \
-  mosquitto_passwd /mosquitto/config/password_file birdfeeder
-
-docker exec -u root backyardbirdwatch-mosquitto-1 \
-  chown mosquitto:mosquitto /mosquitto/config/password_file
-docker exec -u root backyardbirdwatch-mosquitto-1 \
-  chmod 0700 /mosquitto/config/password_file
-
-docker compose -f docker-compose.opencv.yml restart mosquitto
 ```
+
+Mosquitto generates its password file automatically from `MQTT_USER` and `MQTT_PASSWORD` on first start — no manual setup required.
 
 ### 3. Verify
 
@@ -296,7 +283,7 @@ sqlite3 data/detections.db \
 
 # Watch MQTT traffic
 docker compose -f docker-compose.opencv.yml exec mosquitto \
-  mosquitto_sub -u birdfeeder -P <password> -t "birdfeeder/#" -v
+  mosquitto_sub -u $MQTT_USER -P $MQTT_PASSWORD -t "birdfeeder/#" -v
 ```
 
 ---
