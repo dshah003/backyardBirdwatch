@@ -1,6 +1,6 @@
 # Backyard Bird Feeder Detection System
 
-A local, privacy-first bird detection and species identification system for a backyard feeder. The system reads an RTSP stream from an IP camera, detects birds and predators using YOLOv8, identifies species using a swappable classifier backend, logs all activity to CSV/SQLite, and publishes events to MQTT for downstream automations. Everything runs on a single Ubuntu laptop — no cloud services required.
+A local, bird detection and species identification system for a backyard feeder. The system reads an RTSP stream from an IP camera, detects birds and predators using YOLOv8, identifies species using a swappable classifier backend, logs all activity to CSV/SQLite, and publishes events to MQTT for downstream automations. Everything runs on a single Ubuntu laptop — no cloud services required.
 
 ```
 Tapo C200 ──RTSP──▶ bird-detector ──MQTT──▶ birdfeeder/* topics
@@ -8,6 +8,9 @@ Tapo C200 ──RTSP──▶ bird-detector ──MQTT──▶ birdfeeder/* top
                     motion → YOLO             ▼
                     → classifier         CSV / SQLite
 ```
+For more info on development of this project, read:  
+- **[Building a Backyard Bird Watcher with AI: Part 1 — The Journey So Far](https://medium.com/@darshan.rajvi.shah/building-a-backyard-bird-watcher-with-ai-part-1-the-journey-so-far-6e875d9aacfc)**
+- **[Building a Backyard Bird Watcher with AI: Part 2 — Training Your Own Model](https://medium.com/@darshan.rajvi.shah/building-a-backyard-bird-watcher-with-ai-part-2-training-your-own-model-a8afde4a0f0d)**
 
 ---
 
