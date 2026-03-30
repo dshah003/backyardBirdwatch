@@ -13,7 +13,9 @@ services:
   mosquitto:
     image: eclipse-mosquitto:2
     command: >
-      sh -c "mosquitto_passwd -b -c /mosquitto/config/password_file $$MQTT_USER $$MQTT_PASSWORD &&
+      sh -c "rm -f /mosquitto/config/password_file &&
+             mosquitto_passwd -b -c /mosquitto/config/password_file $$MQTT_USER $$MQTT_PASSWORD &&
+             chown mosquitto:mosquitto /mosquitto/config/password_file &&
              mosquitto -c /mosquitto/config/mosquitto.conf"
     environment:
       MQTT_USER: "${MQTT_USER}"
