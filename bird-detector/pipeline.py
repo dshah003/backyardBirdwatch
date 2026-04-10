@@ -6,9 +6,10 @@ Loop:
   3. On motion → BirdDetector (YOLOv8n) scans the full frame for bird/cat.
   4. For each 'bird' detection → species classifier (backend set by
      CLASSIFIER_BACKEND: 'tfhub' | 'bioclip' | 'nabirds' | 'efficientnet').
-  5. Results above MIN_CONFIDENCE_LOG are written to CSV + SQLite and
-     published to MQTT.  A per-region cooldown prevents duplicate entries
-     for the same bird sitting at the feeder.
+  5. Detections are fed into BirdTracker, which associates them across frames
+     using IoU overlap and accumulates per-species classification votes.
+  6. When a track closes (bird leaves frame), the winner is logged to
+     CSV + SQLite and published to MQTT — one entry per visit, not per frame.
 
 Run standalone (no Docker):
     python pipeline.py
@@ -34,6 +35,7 @@ import config
 from detector import BirdDetector, Detection
 from logger import DetectionLogger, DetectionRecord
 from motion import MotionDetector
+from tracker import BirdTracker, ClosedTrack
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,8 +140,7 @@ def _draw_debug(
 ) -> np.ndarray:
     display = frame.copy()
     for region in motion_regions:
-        x, y, w, h = cv2.boundingRect(region)
-        cv2.rectangle(display, (x, y), (x + w, y + h), _COLOR_MOTION, 1)
+        cv2.rectangle(display, (region.x, region.y), (region.x2, region.y2), _COLOR_MOTION, 1)
     for det in detections:
         color = _COLOR_PREDATOR if det.label != "bird" else _COLOR_BIRD
         cv2.rectangle(display, (det.x1, det.y1), (det.x2, det.y2), color, 2)
@@ -184,47 +185,29 @@ def _mqtt_publish(client, topic: str, payload: dict) -> None:
 
 # ── Snapshot saving ────────────────────────────────────────────────────────
 
-def _save_snapshot(frame: np.ndarray, det: Detection, ts: str) -> str | None:
-    """Crop the detection region and save as JPEG.  Returns relative path."""
+def _save_track_snapshot(track: ClosedTrack) -> str | None:
+    """Save the best crop from a closed track.  Returns relative path."""
+    if track.crop is None or track.species_common is None:
+        return None
     try:
-        config.SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        date_str = ts[:10]  # YYYY-MM-DD
+        date_str = track.first_seen[:10]  # YYYY-MM-DD
         day_dir = config.SNAPSHOT_DIR / date_str
         day_dir.mkdir(parents=True, exist_ok=True)
 
-        slug = det.label.replace(" ", "-")
-        safe_ts = ts.replace(":", "-").replace("+", "")
-        filename = f"{safe_ts}_{slug}_{det.confidence:.2f}.jpg"
+        slug = track.species_common.lower().replace(" ", "-")
+        safe_ts = track.first_seen.replace(":", "-").replace("+", "")
+        filename = f"{safe_ts}_{slug}_{track.confidence:.2f}.jpg"
         path = day_dir / filename
 
-        crop = frame[det.y1 : det.y2, det.x1 : det.x2]
         cv2.imwrite(
             str(path),
-            crop,
+            track.crop,
             [cv2.IMWRITE_JPEG_QUALITY, config.SNAPSHOT_JPEG_QUALITY],
         )
         return str(path.relative_to(config.DATA_DIR))
     except Exception:
-        logger.exception("Failed to save snapshot")
+        logger.exception("Failed to save track snapshot")
         return None
-
-
-# ── Cooldown tracker ───────────────────────────────────────────────────────
-
-class _CooldownTracker:
-    """Per-region detection cooldown to suppress duplicate log entries."""
-
-    def __init__(self, cooldown_sec: float) -> None:
-        self._cooldown = cooldown_sec
-        self._last: dict[tuple[int, int], float] = {}
-
-    def is_ready(self, det: Detection) -> bool:
-        key = (det.x1 // 50, det.y1 // 50)
-        now = time.monotonic()
-        if now - self._last.get(key, 0.0) >= self._cooldown:
-            self._last[key] = now
-            return True
-        return False
 
 
 # ── Video capture with frame-rate throttle ────────────────────────────────
@@ -290,6 +273,115 @@ def _make_classifier():
         return SpeciesClassifier(species_list_path=config.SPECIES_LIST_PATH)
 
 
+# ── Closed-track handlers ─────────────────────────────────────────────────
+
+def _handle_closed_track(
+    track: ClosedTrack,
+    det_logger: DetectionLogger,
+    mqtt,
+) -> None:
+    """Log and publish a finalized track."""
+    if track.is_unknown or track.species_common is None:
+        _handle_unknown_track(track, mqtt)
+        return
+
+    snap = _save_track_snapshot(track)
+    record = DetectionRecord(
+        timestamp=track.first_seen,
+        species_common=track.species_common,
+        confidence=track.confidence,
+        classifier=config.CLASSIFIER_BACKEND,
+        snapshot_path=snap,
+        duration_sec=track.duration_sec,
+    )
+    det_logger.log(record)
+
+    payload = {
+        "timestamp": track.first_seen,
+        "species_common": track.species_common,
+        "confidence": track.confidence,
+        "classifier": config.CLASSIFIER_BACKEND,
+        "snapshot_path": snap,
+        "yolo_confidence": track.yolo_confidence,
+        "duration_sec": track.duration_sec,
+        "frame_count": track.frame_count,
+        "vote_summary": track.vote_summary,
+        "track_id": track.track_id,
+    }
+    _mqtt_publish(mqtt, config.TOPIC_DETECTION, payload)
+
+    if track.confidence >= config.MIN_CONFIDENCE_NOTIFY:
+        slug = track.species_common.lower().replace(" ", "-")
+        _mqtt_publish(mqtt, f"{config.TOPIC_DETECTION}/{slug}", payload)
+
+
+def _handle_unknown_track(track: ClosedTrack, mqtt) -> None:
+    logger.info(
+        "Low-confidence track #%d (conf=%.2f, %d frames) — saving to corrections/",
+        track.track_id, track.confidence, track.frame_count,
+    )
+    if track.crop is not None:
+        try:
+            config.CORRECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+            safe_ts = track.first_seen.replace(":", "-").replace("+", "")
+            best = (track.species_common or "unknown").lower().replace(" ", "-")
+            path = config.CORRECTIONS_DIR / f"{safe_ts}_{best}_{track.confidence:.2f}.jpg"
+            cv2.imwrite(str(path), track.crop, [cv2.IMWRITE_JPEG_QUALITY, config.SNAPSHOT_JPEG_QUALITY])
+        except Exception:
+            logger.exception("Failed to save unknown track image")
+    _mqtt_publish(mqtt, config.TOPIC_UNKNOWN, {
+        "timestamp": track.first_seen,
+        "confidence": track.confidence,
+        "track_id": track.track_id,
+        "vote_summary": track.vote_summary,
+    })
+
+
+def _handle_predator(
+    det: Detection,
+    frame: np.ndarray,
+    ts: str,
+    det_logger: DetectionLogger,
+    mqtt,
+) -> None:
+    logger.warning("PREDATOR detected: %s  conf=%.2f", det.label, det.confidence)
+    snap = _save_snapshot(frame, det, ts)
+    record = DetectionRecord(
+        timestamp=ts,
+        species_common=det.label,
+        confidence=det.confidence,
+        classifier="yolov8",
+        snapshot_path=snap,
+    )
+    det_logger.log(record)
+    payload = {
+        "timestamp": ts,
+        "label": det.label,
+        "confidence": det.confidence,
+        "snapshot_path": snap,
+        "bbox": [det.x1, det.y1, det.x2, det.y2],
+    }
+    _mqtt_publish(mqtt, config.TOPIC_PREDATOR_ALERT, payload)
+
+
+def _save_snapshot(frame: np.ndarray, det: Detection, ts: str) -> str | None:
+    """Save a full-frame crop for a non-bird detection (predators)."""
+    try:
+        date_str = ts[:10]
+        day_dir = config.SNAPSHOT_DIR / date_str
+        day_dir.mkdir(parents=True, exist_ok=True)
+        slug = det.label.replace(" ", "-")
+        safe_ts = ts.replace(":", "-").replace("+", "")
+        filename = f"{safe_ts}_{slug}_{det.confidence:.2f}.jpg"
+        path = day_dir / filename
+        crop = frame[det.y1 : det.y2, det.x1 : det.x2]
+        cv2.imwrite(str(path), crop, [cv2.IMWRITE_JPEG_QUALITY, config.SNAPSHOT_JPEG_QUALITY])
+        return str(path.relative_to(config.DATA_DIR))
+    except Exception:
+        logger.exception("Failed to save snapshot")
+        return None
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────
 
 def run(debug_port: int | None = None) -> None:
@@ -317,7 +409,12 @@ def run(debug_port: int | None = None) -> None:
     )
     classifier = _make_classifier()
     det_logger = DetectionLogger()
-    cooldown = _CooldownTracker(config.DETECTION_COOLDOWN_SEC)
+    tracker = BirdTracker(
+        iou_threshold=config.TRACKER_IOU_THRESHOLD,
+        max_gap_sec=config.TRACKER_MAX_GAP_SEC,
+        min_frames_confirm=config.TRACKER_MIN_FRAMES_CONFIRM,
+        min_vote_confidence=config.TRACKER_MIN_VOTE_CONFIDENCE,
+    )
     mqtt = _make_mqtt_client()
 
     bird_detector.load()
@@ -332,6 +429,7 @@ def run(debug_port: int | None = None) -> None:
             time.sleep(5)
             continue
 
+        stream_ended = False
         try:
             logger.info("Warming up motion background model …")
             first_frame = None
@@ -345,7 +443,6 @@ def run(debug_port: int | None = None) -> None:
                 loop_count += 1
                 motion_regions = motion_detector.detect(frame)
 
-                # In debug mode, push every frame (with or without motion)
                 if mjpeg is not None and not motion_regions:
                     mjpeg.push(frame)
 
@@ -356,121 +453,79 @@ def run(debug_port: int | None = None) -> None:
                     "Frame %d: %d motion region(s)", loop_count, len(motion_regions)
                 )
 
+                ts = datetime.now(timezone.utc).isoformat()
                 detections = bird_detector.detect(frame)
-                debug_labels: dict = {}  # det → label string for debug overlay
+                debug_labels: dict = {}
+
+                # Collect bird detections with their classifications for the tracker.
+                # Predators are handled immediately (alert-worthy, no need to debounce).
+                bird_dets: list[tuple[Detection, str, float, np.ndarray]] = []
 
                 for det in detections:
-                    ts = datetime.now(timezone.utc).isoformat()
-
                     if det.label != "bird":
                         debug_labels[det] = f"{det.label} {det.confidence:.2f}"
                         if det.confidence >= config.PREDATOR_MIN_CONFIDENCE:
                             _handle_predator(det, frame, ts, det_logger, mqtt)
                         else:
                             logger.debug(
-                                "Non-bird detection below predator threshold: "
-                                "%s conf=%.2f (threshold=%.2f) — skipping",
-                                det.label, det.confidence, config.PREDATOR_MIN_CONFIDENCE,
+                                "Non-bird below predator threshold: "
+                                "%s conf=%.2f — skipping",
+                                det.label, det.confidence,
                             )
                         continue
 
-                    # Bird — run species classifier
+                    # Bird — run species classifier on the crop
                     crop = frame[det.y1 : det.y2, det.x1 : det.x2]
+                    if crop.size == 0:
+                        continue
                     top = classifier.classify(crop)
                     if not top:
-                        logger.debug("Classifier returned no results for detection")
                         debug_labels[det] = f"bird {det.confidence:.2f}"
                         continue
 
                     species, conf = top[0]
                     debug_labels[det] = f"{species} {conf:.0%}"
-                    logger.info(
-                        "Bird detected: %s  yolo_conf=%.2f  species_conf=%.2f",
-                        species,
-                        det.confidence,
-                        conf,
+                    logger.debug(
+                        "Bird frame: %s  yolo=%.2f  species_conf=%.2f",
+                        species, det.confidence, conf,
                     )
+                    bird_dets.append((det, species, conf, crop))
 
-                    if conf < config.MIN_CONFIDENCE_LOG:
-                        _handle_unknown(det, frame, ts, conf, det_logger, mqtt)
-                        continue
+                # Feed detections into the tracker
+                closed_tracks, det_to_tid = tracker.update(bird_dets, ts)
 
-                    if not cooldown.is_ready(det):
-                        logger.debug("Cooldown active for region (%d,%d)", det.x1, det.y1)
-                        continue
+                # Annotate debug labels with track IDs
+                for d_idx, (det, species, conf, _) in enumerate(bird_dets):
+                    tid = det_to_tid.get(d_idx)
+                    if tid is not None:
+                        debug_labels[det] = f"#{tid} {species} {conf:.0%}"
 
-                    snap = _save_snapshot(frame, det, ts)
-                    record = DetectionRecord(
-                        timestamp=ts,
-                        species_common=species,
-                        confidence=conf,
-                        classifier=config.CLASSIFIER_BACKEND,
-                        snapshot_path=snap,
-                    )
-                    det_logger.log(record)
-
-                    payload = {
-                        "timestamp": ts,
-                        "species_common": species,
-                        "confidence": conf,
-                        "classifier": config.CLASSIFIER_BACKEND,
-                        "snapshot_path": snap,
-                        "yolo_confidence": det.confidence,
-                        "bbox": [det.x1, det.y1, det.x2, det.y2],
-                    }
-                    _mqtt_publish(mqtt, config.TOPIC_DETECTION, payload)
-
-                    if conf >= config.MIN_CONFIDENCE_NOTIFY:
-                        slug = species.lower().replace(" ", "-")
-                        _mqtt_publish(mqtt, f"{config.TOPIC_DETECTION}/{slug}", payload)
+                # Log any tracks that just closed
+                for track in closed_tracks:
+                    _handle_closed_track(track, det_logger, mqtt)
 
                 if mjpeg is not None:
                     mjpeg.push(_draw_debug(frame, motion_regions, detections, debug_labels))
 
-        except StopIteration:
-            logger.info("End of video stream — restarting …")
-            if not config.VIDEO_LOOP:
-                logger.info("VIDEO_LOOP=false — exiting")
-                break
+            # for-loop exited normally → stream ended (StopIteration is swallowed
+            # by the for-statement and never reaches except StopIteration below)
+            stream_ended = True
+
         except Exception:
             logger.exception("Unexpected error in capture loop — restarting in 5 s")
+            stream_ended = False
             time.sleep(5)
         finally:
             cap.release()
 
-
-def _handle_predator(det: Detection, frame: np.ndarray, ts: str, det_logger: DetectionLogger, mqtt) -> None:
-    logger.warning("PREDATOR detected: %s  conf=%.2f", det.label, det.confidence)
-    snap = _save_snapshot(frame, det, ts)
-    record = DetectionRecord(
-        timestamp=ts,
-        species_common=det.label,
-        confidence=det.confidence,
-        classifier="yolov8",
-        snapshot_path=snap,
-    )
-    det_logger.log(record)
-    payload = {
-        "timestamp": ts,
-        "label": det.label,
-        "confidence": det.confidence,
-        "snapshot_path": snap,
-        "bbox": [det.x1, det.y1, det.x2, det.y2],
-    }
-    _mqtt_publish(mqtt, config.TOPIC_PREDATOR_ALERT, payload)
-
-
-def _handle_unknown(det: Detection, frame: np.ndarray, ts: str, conf: float, det_logger: DetectionLogger, mqtt) -> None:
-    logger.info("Low-confidence detection (%.2f) — saving to corrections/", conf)
-    try:
-        config.CORRECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-        safe_ts = ts.replace(":", "-").replace("+", "")
-        path = config.CORRECTIONS_DIR / f"{safe_ts}_unknown_{conf:.2f}.jpg"
-        crop = frame[det.y1 : det.y2, det.x1 : det.x2]
-        cv2.imwrite(str(path), crop, [cv2.IMWRITE_JPEG_QUALITY, config.SNAPSHOT_JPEG_QUALITY])
-    except Exception:
-        logger.exception("Failed to save unknown detection image")
-    _mqtt_publish(mqtt, config.TOPIC_UNKNOWN, {"timestamp": ts, "confidence": conf})
+        if stream_ended:
+            logger.info("End of video stream — flushing active tracks …")
+            for track in tracker.flush():
+                _handle_closed_track(track, det_logger, mqtt)
+            if not config.VIDEO_LOOP:
+                logger.info("VIDEO_LOOP=false — exiting")
+                break
+            logger.info("Restarting stream …")
 
 
 def main() -> None:

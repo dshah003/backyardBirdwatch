@@ -86,7 +86,16 @@ SPECIES_LIST_PATH: Path = Path(os.environ.get("SPECIES_LIST_PATH", "/app/species
 # ── Logging / notification thresholds ───────────────────────────────────────
 MIN_CONFIDENCE_LOG: float = float(os.environ.get("MIN_CONFIDENCE_LOG", "0.3"))
 MIN_CONFIDENCE_NOTIFY: float = float(os.environ.get("MIN_CONFIDENCE_NOTIFY", "0.7"))
-DETECTION_COOLDOWN_SEC: float = float(os.environ.get("DETECTION_COOLDOWN_SEC", "10.0"))
+
+# ── Bird tracker ─────────────────────────────────────────────────────────────
+# Minimum IoU overlap to associate a detection with an existing track.
+TRACKER_IOU_THRESHOLD: float = float(os.environ.get("TRACKER_IOU_THRESHOLD", "0.3"))
+# Seconds without a matching detection before a track is closed and logged.
+TRACKER_MAX_GAP_SEC: float = float(os.environ.get("TRACKER_MAX_GAP_SEC", "2.0"))
+# Minimum frames before a track is confirmed (single-frame noise filter).
+TRACKER_MIN_FRAMES_CONFIRM: int = int(os.environ.get("TRACKER_MIN_FRAMES_CONFIRM", "3"))
+# Species classification frames below this confidence don't cast a vote.
+TRACKER_MIN_VOTE_CONFIDENCE: float = float(os.environ.get("TRACKER_MIN_VOTE_CONFIDENCE", "0.3"))
 
 # ── MQTT ────────────────────────────────────────────────────────────────────
 MQTT_HOST: str = os.environ.get("MQTT_HOST", "localhost")
